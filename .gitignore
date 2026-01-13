@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.app
+*.dSYM
+.claude-config
+.claude/
+docs/APP-NAME-PROPOSALS.md
+docs/PUBLISHING-RESEARCH.md
+.obsidian/
+docs/.obsidian/
