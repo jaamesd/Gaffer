@@ -19,8 +19,16 @@ macOS Tahoe introduced rounded window corners, but the desktop wallpaper still h
 
 ## Installation
 
-1. Download `Gaffer.app` from Releases
-2. Move to `/Applications`
+### Homebrew
+
+```bash
+brew install jaamesd/tap/gaffer
+```
+
+### Manual
+
+1. Download `Gaffer.zip` from [Releases](https://github.com/jaamesd/Gaffer/releases)
+2. Extract and move `Gaffer.app` to `/Applications`
 3. Right-click and select "Open" (required for first launch)
 4. Click "Open" in the dialog
 
