@@ -292,7 +292,6 @@ class MenuBarViewModel: ObservableObject {
             guard updateMode != oldValue else { return }
             AppConfig.shared.updateMode = updateMode
             AppConfig.shared.save()
-            MonitorService.shared.restartTimer()
         }
     }
     @Published var currentSourceURL: URL?

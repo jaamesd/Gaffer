@@ -12,24 +12,22 @@ class MonitorService {
     private let debugEnabled = false
     #endif
 
-    private var timer: Timer?
     private var burstTimer: Timer?
     private var spaceObserver: NSObjectProtocol?
     private var displayObserver: NSObjectProtocol?
-    private var appearanceObserver: NSKeyValueObservation?
+    private var appearanceObserver: NSObjectProtocol?
     private var powerObserver: NSObjectProtocol?
     private var lastAppearanceIsDark: Bool?
     private var lastSpaceCount: Int = 0
 
-    // Burst mode: rapid polling after space changes when on AC power
+    // File system monitoring for wallpaper changes
+    private var fileMonitorSource: DispatchSourceFileSystemObject?
+    private var fileDescriptor: Int32 = -1
+
+    // Burst mode: rapid checking after events
     private var burstModeActive = false
     private var burstModeEndTime: Date?
     private var lastSpaceChangeTime: Date?
-
-    // Sustained mode: moderate polling (1-2Hz) for 60s after successful update
-    private var sustainedModeActive = false
-    private var sustainedModeEndTime: Date?
-    private var sustainedTimer: Timer?
 
     private init() {}
 
@@ -41,8 +39,9 @@ class MonitorService {
     }
 
     func startMonitoring() {
+        debugLog("Starting monitoring")
         updateSpaceCount()
-        setupTimer()
+        setupFileMonitor()
         setupSpaceChangeObserver()
         setupDisplayChangeObserver()
         setupAppearanceObserver()
@@ -50,19 +49,20 @@ class MonitorService {
     }
 
     func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+        // Stop file monitor
+        fileMonitorSource?.cancel()
+        fileMonitorSource = nil
+        if fileDescriptor >= 0 {
+            close(fileDescriptor)
+            fileDescriptor = -1
+        }
 
         burstTimer?.invalidate()
         burstTimer = nil
         burstModeActive = false
 
-        sustainedTimer?.invalidate()
-        sustainedTimer = nil
-        sustainedModeActive = false
-
         if let observer = spaceObserver {
-            NotificationCenter.default.removeObserver(observer)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
             spaceObserver = nil
         }
 
@@ -76,74 +76,84 @@ class MonitorService {
             powerObserver = nil
         }
 
-        appearanceObserver?.invalidate()
-        appearanceObserver = nil
+        if let observer = appearanceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            appearanceObserver = nil
+        }
     }
 
-    private func setupTimer() {
-        timer?.invalidate()
+    // MARK: - File System Monitoring
 
-        let mode = AppConfig.shared.updateMode
+    private func setupFileMonitor() {
+        // Watch for wallpaper changes - try multiple locations for compatibility
+        let home = FileManager.default.homeDirectoryForCurrentUser
 
-        // Off mode: no polling at all
-        if mode == .off {
-            print("Update mode: OFF - no polling")
+        // Modern macOS (Ventura+): plist in Preferences
+        let plistPath = home.appendingPathComponent("Library/Preferences/com.apple.wallpaper.plist")
+        // Legacy macOS: SQLite database in Dock folder
+        let dbPath = home.appendingPathComponent("Library/Application Support/Dock/desktoppicture.db")
+
+        let pathToWatch: URL
+        if FileManager.default.fileExists(atPath: plistPath.path) {
+            pathToWatch = plistPath
+        } else if FileManager.default.fileExists(atPath: dbPath.path) {
+            pathToWatch = dbPath
+        } else {
+            print("No wallpaper config file found - file monitor disabled")
+            print("  Tried: \(plistPath.path)")
+            print("  Tried: \(dbPath.path)")
             return
         }
 
-        // Determine base interval based on mode and power state
-        let interval = getNormalInterval(mode: mode)
+        fileDescriptor = open(pathToWatch.path, O_EVTONLY)
+        guard fileDescriptor >= 0 else {
+            print("Failed to open wallpaper config for monitoring: \(pathToWatch.path)")
+            return
+        }
 
-        print("Update mode: \(mode.displayName) - interval: \(Int(interval))s (AC: \(isOnACPower()), battery: \(getBatteryLevel())%)")
+        fileMonitorSource = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fileDescriptor,
+            eventMask: [.write, .extend, .attrib, .rename],
+            queue: .main
+        )
 
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        fileMonitorSource?.setEventHandler { [weak self] in
+            self?.handleWallpaperFileChange()
+        }
+
+        fileMonitorSource?.setCancelHandler { [weak self] in
+            if let fd = self?.fileDescriptor, fd >= 0 {
+                close(fd)
+                self?.fileDescriptor = -1
+            }
+        }
+
+        fileMonitorSource?.resume()
+        print("File monitor started on: \(pathToWatch.lastPathComponent)")
+    }
+
+    private func handleWallpaperFileChange() {
+        debugLog("Desktop picture database changed")
+
+        // Check immediately for quick response
+        performCheck()
+
+        // Retry with increasing delays to catch macOS settling
+        // Longer delays help detect external wallpaper changes reliably
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.performCheck()
         }
-    }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.performCheck()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.performCheck()
+        }
 
-    func restartTimer() {
-        setupTimer()
-    }
-
-    // MARK: - Polling Parameters
-
-    /// Normal polling interval based on mode and power state
-    private func getNormalInterval(mode: UpdateMode) -> TimeInterval {
-        let onAC = isOnACPower()
-        let battery = getBatteryLevel()
-
-        switch mode {
-        case .off:
-            return 0  // Not used
-        case .snappy:
-            // Snappy: very responsive
-            if onAC {
-                return 1.0  // 1Hz on AC
-            } else if battery > 20 {
-                return 5.0   // 5s on battery
-            } else {
-                return 15.0  // 15s on low battery
-            }
-        case .smarty:
-            // Smarty: balanced approach
-            if onAC {
-                return 10.0  // 10s on AC
-            } else if battery > 50 {
-                return 30.0  // 30s on good battery
-            } else if battery > 20 {
-                return 60.0  // 1min on moderate battery
-            } else {
-                return 120.0 // 2min on low battery
-            }
-        case .thrifty:
-            // Thrifty: power-conscious
-            if onAC {
-                return 60.0  // 1min on AC
-            } else if battery > 30 {
-                return 300.0 // 5min on battery
-            } else {
-                return 600.0 // 10min on low battery
-            }
+        // Enter burst mode for continued monitoring
+        let mode = AppConfig.shared.updateMode
+        if mode != .off {
+            enterBurstMode()
         }
     }
 
@@ -153,57 +163,21 @@ class MonitorService {
 
         switch mode {
         case .snappy:
-            // Snappy: very aggressive burst
-            return onAC ? (0.025, 8.0) : (0.05, 5.0)  // 40Hz/8s on AC, 20Hz/5s on battery
+            return onAC ? (0.025, 5.0) : (0.05, 3.0)  // 40Hz/5s on AC, 20Hz/3s on battery
         case .smarty:
-            // Smarty: moderate burst
-            return onAC ? (0.05, 5.0) : (0.1, 3.0)   // 20Hz/5s on AC, 10Hz/3s on battery
+            return onAC ? (0.05, 3.0) : (0.1, 2.0)    // 20Hz/3s on AC, 10Hz/2s on battery
         case .thrifty:
-            // Thrifty: 5Hz on AC, minimal on battery
-            return onAC ? (0.2, 3.0) : (0.5, 2.0)    // 5Hz/3s on AC, 2Hz/2s on battery
+            return onAC ? (0.2, 2.0) : (0.5, 1.0)     // 5Hz/2s on AC, 2Hz/1s on battery
         default:
-            return (1.0, 1.0)  // Off: minimal
-        }
-    }
-
-    /// Sustained mode parameters based on mode and power state
-    private func getSustainedParams(mode: UpdateMode) -> (interval: TimeInterval, duration: TimeInterval) {
-        let onAC = isOnACPower()
-        let battery = getBatteryLevel()
-
-        switch mode {
-        case .snappy:
-            // Snappy: aggressive sustained
-            if onAC {
-                return (0.1, 180.0)  // 10Hz for 3min on AC
-            } else {
-                return (0.25, 90.0)  // 4Hz for 90s on battery
-            }
-        case .smarty:
-            // Smarty: balanced sustained
-            if onAC {
-                return (0.25, 120.0) // 4Hz for 2min on AC
-            } else if battery > 50 {
-                return (0.5, 60.0)   // 2Hz for 1min on good battery
-            } else {
-                return (1.0, 30.0)   // 1Hz for 30s on low battery
-            }
-        case .thrifty:
-            // Thrifty: 2Hz on AC, minimal on battery
-            if onAC {
-                return (0.5, 60.0)   // 2Hz for 1min on AC
-            } else {
-                return (2.0, 30.0)   // 0.5Hz for 30s on battery
-            }
-        default:
-            return (5.0, 10.0)  // Off: minimal
+            return (1.0, 1.0)
         }
     }
 
     private func setupSpaceChangeObserver() {
-        spaceObserver = NotificationCenter.default.addObserver(
+        // Must use workspace notification center for workspace notifications
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
+            object: NSWorkspace.shared,
             queue: .main
         ) { [weak self] _ in
             self?.handleSpaceChange()
@@ -214,25 +188,19 @@ class MonitorService {
         lastSpaceChangeTime = Date()
         updateSpaceCount()
 
-        // Immediately perform a check
+        // Check immediately, then retry after short delays to catch macOS settling
+        // The space transition timing is variable, so we check multiple times
         performCheck()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.performCheck()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.performCheck()
+        }
 
         let mode = AppConfig.shared.updateMode
         guard mode != .off else { return }
 
-        // If in sustained mode, extend it and trigger burst
-        if sustainedModeActive {
-            let params = getSustainedParams(mode: mode)
-            sustainedModeEndTime = Date().addingTimeInterval(params.duration)
-            debugLog("Extended sustained mode for \(Int(params.duration))s due to space change")
-        }
-
-        // Exit sustained and enter burst for rapid updates
-        if sustainedModeActive {
-            sustainedTimer?.invalidate()
-            sustainedTimer = nil
-            sustainedModeActive = false
-        }
         enterBurstMode()
     }
 
@@ -253,9 +221,6 @@ class MonitorService {
         burstModeEndTime = Date().addingTimeInterval(params.duration)
 
         debugLog("Entering burst mode: \(Int(1/params.interval))Hz for \(params.duration)s")
-
-        // Cancel normal timer during burst mode
-        timer?.invalidate()
 
         burstTimer = Timer.scheduledTimer(withTimeInterval: params.interval, repeats: true) { [weak self] _ in
             self?.burstModeCheck()
@@ -287,69 +252,7 @@ class MonitorService {
         burstTimer?.invalidate()
         burstTimer = nil
 
-        // After burst mode, enter sustained mode for continued monitoring
-        let mode = AppConfig.shared.updateMode
-        if mode != .off {
-            enterSustainedMode()
-        } else {
-            debugLog("Exiting burst mode, resuming normal polling")
-            setupTimer()
-        }
-    }
-
-    private func enterSustainedMode() {
-        let mode = AppConfig.shared.updateMode
-        let params = getSustainedParams(mode: mode)
-
-        if sustainedModeActive {
-            // Already in sustained mode, extend the end time
-            sustainedModeEndTime = Date().addingTimeInterval(params.duration)
-            debugLog("Extended sustained mode for \(Int(params.duration))s")
-            return
-        }
-
-        sustainedModeActive = true
-        sustainedModeEndTime = Date().addingTimeInterval(params.duration)
-
-        debugLog("Entering sustained mode: \(1/params.interval)Hz for \(Int(params.duration))s")
-
-        // Cancel normal timer during sustained mode
-        timer?.invalidate()
-
-        sustainedTimer = Timer.scheduledTimer(withTimeInterval: params.interval, repeats: true) { [weak self] _ in
-            self?.sustainedModeCheck()
-        }
-    }
-
-    private func sustainedModeCheck() {
-        guard sustainedModeActive else {
-            exitSustainedMode()
-            return
-        }
-
-        // Check if sustained mode should end
-        if let endTime = sustainedModeEndTime, Date() > endTime {
-            exitSustainedMode()
-            return
-        }
-
-        // Perform moderate-speed check
-        performCheck()
-    }
-
-    private func exitSustainedMode() {
-        guard sustainedModeActive else { return }
-
-        sustainedModeActive = false
-        sustainedModeEndTime = nil
-
-        sustainedTimer?.invalidate()
-        sustainedTimer = nil
-
-        debugLog("Exiting sustained mode, resuming normal polling")
-
-        // Resume normal timer
-        setupTimer()
+        debugLog("Exiting burst mode")
     }
 
     private func setupDisplayChangeObserver() {
@@ -372,24 +275,20 @@ class MonitorService {
             let mode = AppConfig.shared.updateMode
             guard mode != .off else { return }
 
-            // Exit sustained mode if active
-            if self?.sustainedModeActive == true {
-                self?.sustainedTimer?.invalidate()
-                self?.sustainedTimer = nil
-                self?.sustainedModeActive = false
-            }
-
-            // Enter burst mode with slightly longer duration for display changes
             self?.enterBurstMode()
         }
     }
 
     private func setupAppearanceObserver() {
-        // Track initial state
         lastAppearanceIsDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
-        // Observe changes to effective appearance
-        appearanceObserver = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+        // accessibilityDisplayOptionsDidChangeNotification is more reliable than KVO -
+        // catches system-wide changes including auto dark/light switching
+        appearanceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             self?.handleAppearanceChange()
         }
     }
@@ -439,19 +338,14 @@ class MonitorService {
     }
 
     private func setupPowerObserver() {
-        // Observe power source changes to adjust polling
+        // Observe power source changes - burst mode parameters adapt automatically
         powerObserver = NotificationCenter.default.addObserver(
             forName: NSNotification.Name(rawValue: "NSProcessInfoPowerStateDidChangeNotification"),
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.handlePowerChange()
+            self?.debugLog("Power state changed")
         }
-    }
-
-    private func handlePowerChange() {
-        print("Power state changed, reconfiguring timer...")
-        setupTimer()
     }
 
     // MARK: - Battery Status

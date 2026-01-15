@@ -11,9 +11,10 @@ macOS Tahoe introduced rounded window corners, but the desktop wallpaper still h
 - **Corner size options**: None, Small, Medium, Large (matching different window styles)
 - **Dynamic wallpaper support**: Works with multi-frame HEIC wallpapers (like Solar Gradients)
 - **Appearance modes**: Dark, Light, or Auto (follows system appearance)
-- **Multi-display support**: Handles each display independently
+- **Multi-display support**: Handles each display independently with correct aspect ratios
 - **Multi-space support**: Apply to all virtual desktops with one click
-- **Power-aware polling**: Adjusts update frequency based on AC/battery status
+- **Event-driven updates**: Responds instantly to space/display changes without constant polling
+- **Power-aware**: Adjusts burst mode frequency based on AC/battery status
 - **Start on login**: Optional login item support
 
 ## Installation

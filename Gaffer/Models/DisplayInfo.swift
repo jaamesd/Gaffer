@@ -35,14 +35,13 @@ struct DisplayInfo: Identifiable, Hashable {
         let fullFrame = screen.frame
         let rawMenuBarHeight = fullFrame.maxY - visibleFrame.maxY
 
-        // Calculate raw menubar height, then subtract 1 pixel because window content
-        // starts 1 pixel below the reported menubar bottom edge
+        // Convert to physical pixels and round to nearest pixel
         if hasNotch {
-            self.menuBarHeight = round(max(rawMenuBarHeight, safeAreaInsets.top) * scaleFactor) - 1
+            self.menuBarHeight = round(max(rawMenuBarHeight, safeAreaInsets.top) * scaleFactor)
         } else if rawMenuBarHeight > 0 {
-            self.menuBarHeight = round(rawMenuBarHeight * scaleFactor) - 1
+            self.menuBarHeight = round(rawMenuBarHeight * scaleFactor)
         } else {
-            self.menuBarHeight = round(24 * scaleFactor) - 1
+            self.menuBarHeight = round(24 * scaleFactor)
         }
     }
 

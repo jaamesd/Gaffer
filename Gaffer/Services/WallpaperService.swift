@@ -10,6 +10,12 @@ class WallpaperService {
     /// Old cache location that needs cleanup
     private let legacyCachePath: URL
 
+    /// Track when we last set wallpaper (per display) to avoid fighting with external changes
+    private var lastSetTime: [String: Date] = [:]
+
+    /// Cooldown period after we set a wallpaper - ignore file monitor events during this time
+    private let setCooldown: TimeInterval = 2.0
+
     private init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         legacyCachePath = home.appendingPathComponent(".gaffer-legacy")
@@ -40,8 +46,28 @@ class WallpaperService {
         workspace.desktopImageURL(for: screen)
     }
 
+    /// Get dimensions of an image file without loading the full image
+    private func getImageDimensions(_ url: URL) -> CGSize? {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let height = properties[kCGImagePropertyPixelHeight] as? CGFloat else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
+    }
+
     func setWallpaper(_ url: URL, for screen: NSScreen) throws {
+        lastSetTime[screen.localizedName] = Date()
         try workspace.setDesktopImageURL(url, for: screen, options: [:])
+    }
+
+    /// Check if we recently set the wallpaper for this display (within cooldown period)
+    func isInCooldown(for displayName: String) -> Bool {
+        guard let lastSet = lastSetTime[displayName] else { return false }
+        return Date().timeIntervalSince(lastSet) < setCooldown
     }
 
     /// Process wallpaper for all displays
@@ -65,6 +91,14 @@ class WallpaperService {
         }
 
         let isCurrentProcessed = isGeneratedImage(currentURL)
+
+        // If we're in cooldown and current wallpaper is NOT our generated image,
+        // the user likely just changed wallpaper externally - let it settle
+        if isInCooldown(for: display.name) && !isCurrentProcessed {
+            print("[\(display.name)] In cooldown, skipping to let external change settle")
+            return
+        }
+
         print("[\(display.name)] Current: \(currentURL.lastPathComponent) (processed: \(isCurrentProcessed))")
 
         // Determine the source wallpaper first (needed for cache key)
@@ -124,15 +158,24 @@ class WallpaperService {
             }
         }
 
-        // Check if generated file already exists
+        // Check if generated file already exists and has correct dimensions
         if FileManager.default.fileExists(atPath: outputURL.path) {
-            do {
-                try setWallpaper(outputURL, for: display.screen)
-                print("[\(display.name)] ✓ Applied cached: \(outputURL.lastPathComponent)")
-            } catch {
-                print("[\(display.name)] ✗ Failed to apply cached: \(error)")
+            // Verify cached image dimensions match display resolution
+            if let cachedSize = getImageDimensions(outputURL),
+               Int(cachedSize.width) == Int(display.physicalRes.width),
+               Int(cachedSize.height) == Int(display.physicalRes.height) {
+                do {
+                    try setWallpaper(outputURL, for: display.screen)
+                    print("[\(display.name)] ✓ Applied cached: \(outputURL.lastPathComponent)")
+                } catch {
+                    print("[\(display.name)] ✗ Failed to apply cached: \(error)")
+                }
+                return
+            } else {
+                // Dimensions mismatch - delete stale cache and regenerate
+                print("[\(display.name)] ⚠️ Cached image dimensions mismatch, regenerating...")
+                try? FileManager.default.removeItem(at: outputURL)
             }
-            return
         }
 
         print("[\(display.name)] Generating new processed wallpaper (frame: \(frameIndex ?? 0))...")

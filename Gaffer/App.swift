@@ -1,12 +1,15 @@
 import SwiftUI
 
 @main
-struct TahoeBlackMenubarApp: App {
+struct GafferApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        Settings {
-            EmptyView()
+        MenuBarExtra {
+            MenuBarView()
+        } label: {
+            Image(systemName: "rectangle.topthird.inset.filled")
         }
+        .menuBarExtraStyle(.window)
     }
 }

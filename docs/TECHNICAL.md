@@ -35,12 +35,13 @@ User selects wallpaper
 Cache keys include multiple factors to ensure correct invalidation:
 - Display name (for multi-monitor setups)
 - Corner style (None/Small/Medium/Large)
-- Menubar height (varies by display)
+- Menubar height (varies by display, accounts for notch)
 - Frame index (for dynamic HEIC wallpapers)
 - Appearance mode (Dark/Light/Auto)
+- Display resolution (prevents aspect ratio mismatches)
 - Source file hash (to detect when source changes)
 
-Example filename: `Built-in_Display_c2_m24_f0_a2_1234567890.heic`
+Example filename: `Built-in_Display_c2_m65_f0_a0_3456x2234_1234567890.heic`
 
 ### Dynamic Wallpaper Support
 
@@ -65,52 +66,54 @@ tell application "System Events"
 end tell
 ```
 
+### Event-Driven Architecture
+
+The app uses an event-driven model instead of constant polling:
+
+#### Event Sources
+1. **File Monitor** - Watches `~/Library/Preferences/com.apple.wallpaper.plist` (modern macOS) or `~/Library/Application Support/Dock/desktoppicture.db` (legacy) for external wallpaper changes
+2. **Space Change** - `NSWorkspace.activeSpaceDidChangeNotification` via workspace notification center
+3. **Display Change** - `NSApplication.didChangeScreenParametersNotification` for monitor connect/disconnect
+4. **Appearance Change** - `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` for dark/light mode
+
+#### Burst Mode
+Triggered by events to catch macOS settling:
+- Immediate check, then retries at 50ms, 150ms (space change) or 100ms, 500ms, 1.5s (file change)
+- Short burst of rapid polling (2-5 seconds) to ensure wallpaper is detected
+
+| Mode    | AC Interval   | AC Duration | Battery Interval | Battery Duration |
+|---------|---------------|-------------|------------------|------------------|
+| Snappy  | 25ms (40Hz)   | 5s          | 50ms (20Hz)      | 3s               |
+| Smarty  | 50ms (20Hz)   | 3s          | 100ms (10Hz)     | 2s               |
+| Thrifty | 200ms (5Hz)   | 2s          | 500ms (2Hz)      | 1s               |
+
+#### No Background Polling
+Between events, the app is completely idle - no timers, no CPU usage. This maximizes battery life.
+
 ### Power Management
 
-The app uses IOKit to detect power state and adjust polling behavior:
+The app uses IOKit to detect power state and adjust burst mode parameters:
 - `IOPSCopyPowerSourcesInfo()` - get power source snapshot
 - `IOPSCopyPowerSourcesList()` - enumerate power sources
 - `IOPSGetPowerSourceDescription()` - check AC vs battery, charge level
 
-### Polling Modes
+### Image Scaling (Aspect Fill)
 
-#### Normal Mode
-| Mode    | AC Power | Battery >50% | Battery 20-50% | Battery <20% |
-|---------|----------|--------------|----------------|--------------|
-| Snappy  | 1s       | 5s           | 5s             | 15s          |
-| Smarty  | 10s      | 30s          | 60s            | 120s         |
-| Thrifty | 60s      | 300s         | 300s           | 600s         |
-| Off     | --       | --           | --             | --           |
+When the source wallpaper has a different aspect ratio than the display, the app uses aspect-fill scaling:
+- Scale uniformly to fill the entire display (preserves aspect ratio)
+- Center the image and crop overflow
+- Prevents stretching/squashing of wallpaper content
 
-#### Burst Mode (on space/display change)
-Triggers immediately after space change or display configuration change.
-
-| Mode    | AC Interval   | AC Duration | Battery Interval | Battery Duration |
-|---------|---------------|-------------|------------------|------------------|
-| Snappy  | 25ms (40Hz)   | 8s          | 50ms (20Hz)      | 5s               |
-| Smarty  | 50ms (20Hz)   | 5s          | 100ms (10Hz)     | 3s               |
-| Thrifty | 200ms (5Hz)   | 3s          | 500ms (2Hz)      | 2s               |
-
-#### Sustained Mode (after burst)
-Continues after burst mode ends, extended on each space change.
-
-| Mode    | AC Interval   | AC Duration | Battery >50%     | Battery <50%     |
-|---------|---------------|-------------|------------------|------------------|
-| Snappy  | 100ms (10Hz)  | 180s        | 250ms (4Hz) / 90s| 250ms / 90s      |
-| Smarty  | 250ms (4Hz)   | 120s        | 500ms (2Hz) / 60s| 1s (1Hz) / 30s   |
-| Thrifty | 500ms (2Hz)   | 60s         | 2s (0.5Hz) / 30s | 2s / 30s         |
-
-#### Mode Transitions
+```swift
+let scale = max(scaleX, scaleY)  // Fill, not fit
+let drawRect = CGRect(x: offsetX, y: offsetY, width: scaledWidth, height: scaledHeight)
 ```
-Space/Display Change
-    └──> Burst Mode (high frequency, short duration)
-            └──> Sustained Mode (moderate frequency, extended on changes)
-                    └──> Normal Mode (polling based on UpdateMode)
 
-Space change during Sustained Mode:
-    └──> Extends sustained timer
-    └──> Immediately enters Burst Mode
-```
+### Dimension Validation
+
+Before applying a cached wallpaper, the app verifies dimensions match the current display:
+- Prevents stretched wallpapers when moving spaces between displays
+- Automatically regenerates if resolution mismatch detected
 
 ## Configuration
 

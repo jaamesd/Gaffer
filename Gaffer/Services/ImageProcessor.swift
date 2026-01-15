@@ -11,6 +11,22 @@ class ImageProcessor {
 
     private init() {}
 
+    /// Calculate the draw rect for aspect-fill scaling (scale uniformly to fill, crop overflow)
+    private func aspectFillRect(sourceSize: CGSize, targetSize: CGSize) -> CGRect {
+        let scaleX = targetSize.width / sourceSize.width
+        let scaleY = targetSize.height / sourceSize.height
+        let scale = max(scaleX, scaleY)  // Use max to fill (crop overflow)
+
+        let scaledWidth = sourceSize.width * scale
+        let scaledHeight = sourceSize.height * scale
+
+        // Center the scaled image (negative offsets mean cropping)
+        let offsetX = (targetSize.width - scaledWidth) / 2
+        let offsetY = (targetSize.height - scaledHeight) / 2
+
+        return CGRect(x: offsetX, y: offsetY, width: scaledWidth, height: scaledHeight)
+    }
+
     func processWallpaper(source: URL, output: URL, display: DisplayInfo, frameIndex: Int? = nil) async -> URL? {
         let ext = source.pathExtension.lowercased()
 
@@ -147,15 +163,19 @@ class ImageProcessor {
             return nil
         }
 
-        // Draw the original image scaled to fill (CGContext origin is bottom-left)
-        let imageRect = CGRect(x: 0, y: 0, width: width, height: height)
+        // Draw the original image using aspect-fill (scale uniformly to fill, crop overflow)
+        // This preserves aspect ratio - circles stay circles, no stretching
         if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            context.draw(cgImage, in: imageRect)
+            let sourceSize = CGSize(width: cgImage.width, height: cgImage.height)
+            let drawRect = aspectFillRect(sourceSize: sourceSize, targetSize: targetSize)
+            context.draw(cgImage, in: drawRect)
         } else {
             // Fallback for images without CGImage representation
+            let sourceSize = image.size
+            let drawRect = aspectFillRect(sourceSize: sourceSize, targetSize: targetSize)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-            image.draw(in: NSRect(origin: .zero, size: targetSize))
+            image.draw(in: drawRect)
             NSGraphicsContext.restoreGraphicsState()
         }
 
