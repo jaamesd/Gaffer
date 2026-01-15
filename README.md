@@ -2,6 +2,10 @@
 
 A macOS menubar app that applies black corner masks to wallpapers, matching the rounded window corners in macOS Tahoe.
 
+<p align="center">
+  <img src="screenshots/menu.png" alt="Gaffer menu" width="300">
+</p>
+
 ## What it does
 
 macOS Tahoe introduced rounded window corners, but the desktop wallpaper still has sharp corners. Gaffer processes your wallpaper to add black fills in the corners, creating a seamless look where the wallpaper appears to have the same rounded corners as your windows.
